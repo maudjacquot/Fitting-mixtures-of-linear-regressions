@@ -1,0 +1,702 @@
+---
+title: "NSA-Projet"
+output: html_document
+date: "2024-11-20"
+---
+
+```{r}
+rm(list=objects()); graphics.off()
+```
+
+```{r}
+# On défini les fonctions qui génère les données dans le cas de mélange de régressions à deux ou trois composantes 
+generate_mixture_two_components <- function(n, pi_1, beta1, beta2, sigma1, sigma2, xL = -1, xU = 3) {
+  x <- runif(n, min = xL, max = xU)   
+  c <- runif(n)                       
+  membership <- ifelse(c <= pi_1, 1, 2)
+  
+  epsilon <- rnorm(n, mean = 0, sd = sqrt(ifelse(membership == 1, sigma1, sigma2)))
+  y <- ifelse(membership == 1, 
+              beta1[1] + beta1[2] * x + epsilon, 
+              beta2[1] + beta2[2] * x + epsilon)
+  
+  data.frame(x = x, y = y, membership = membership)
+}
+
+generate_mixture_three_components <- function(n, pi_1, pi_2, beta1, beta2, beta3, sigma1, sigma2, sigma3, xL = -1, xU = 3) {
+  x <- runif(n, min = xL, max = xU)   
+  c <- runif(n)                       
+  membership <- ifelse(c <= pi_1, 1, ifelse(c <= pi_1 + pi_2, 2, 3))
+  epsilon <- rnorm(n, mean = 0, sd = sqrt(ifelse(membership == 1, sigma1, 
+                                                 ifelse(membership == 2, sigma2, sigma3))))
+  
+  y <- ifelse(membership == 1, 
+              beta1[1] + beta1[2] * x + epsilon,
+              ifelse(membership == 2, 
+                     beta2[1] + beta2[2] * x + epsilon, 
+                     beta3[1] + beta3[2] * x + epsilon))
+  
+  data.frame(x = x, y = y, membership = membership)
+}
+```
+
+```{r}
+# Exemple pour deux composantes parallèles
+n <- 100        # Nombre d'observations
+pi_1 <- 0.5     # Proportion de la première composante
+beta1 = c(0, 1) # Paramètres de la première composante (intercept = 0, pente = 1)
+beta2 = c(4, 1) # Paramètres de la deuxième composante (intercept = 4, pente = 1)
+
+# Génération des données
+data <- generate_mixture_two_components(n, pi_1, beta1, beta2, sigma1 = 1, sigma2 = 1)
+
+# Visualisation des données
+plot(data$x, data$y, main = "Mélange de régressions linéaires à deux composantes", 
+     xlab = "x", ylab = "y", pch = 16, col = ifelse(data$membership == 1, "blue", "red"))
+
+# Ajustement des modèles de régression linéaire pour chaque composante
+model1 <- lm(y ~ x, data = data[data$membership == 1, ])
+model2 <- lm(y ~ x, data = data[data$membership == 2, ])
+
+# Ajouter les droites de régression au graphique
+abline(model1, col = "blue", lwd = 2)
+abline(model2, col = "red", lwd = 2)
+
+```
+
+```{r}
+# Exemple pour deux composantes parallele
+n <- 100       
+pi_1 <- 0.2   
+beta1=c(1,-1)
+beta2=c(0,0.5)
+
+data <- generate_mixture_two_components(n, pi_1,beta1,beta2,sigma1=0.2^2,sigma2=0.2^2)
+
+# Visualisation
+plot(data$x, data$y, main = "Mélange de régressions linéaires à deux composantes", 
+     xlab = "x", ylab = "y", pch = 16, col = ifelse(data$membership == 1, "blue", "red"))
+
+# Fit linear regression models for each component
+model1 <- lm(y ~ x, data = data[data$membership == 1, ])
+model2 <- lm(y ~ x, data = data[data$membership == 2, ])
+
+# Add the regression lines to the plot
+abline(model1, col = "blue", lwd = 2)
+abline(model2, col = "red", lwd = 2)
+```
+```{r}
+compute_bias_mse <- function(true_values, estimated_params) {
+  # Calcul du biais : Valeur estimée - Valeur vraie
+  bias <- c(
+    pi_1 = estimated_params$pi_1 - true_values$pi_1,
+    pi_2 = estimated_params$pi_2 - (1 - true_values$pi_1), 
+    beta1_1 = estimated_params$beta1[1] - true_values$beta1[1],
+    beta1_2 = estimated_params$beta1[2] - true_values$beta1[2],
+    beta2_1 = estimated_params$beta2[1] - true_values$beta2[1],
+    beta2_2 = estimated_params$beta2[2] - true_values$beta2[2],
+    sigma1 = estimated_params$sigma1 - true_values$sigma1,
+    sigma2 = estimated_params$sigma2 - true_values$sigma2
+  )
+  
+  # Calcul de l'erreur quadratique moyenne (MSE) : Moyenne des carrés des erreurs
+  mse <- c(
+    pi_1 = (estimated_params$pi_1 - true_values$pi_1)^2,
+    pi_2 = (estimated_params$pi_2 - (1 - true_values$pi_1))^2, 
+    beta1_1 = (estimated_params$beta1[1] - true_values$beta1[1])^2,
+    beta1_2 = (estimated_params$beta1[2] - true_values$beta1[2])^2,
+    beta2_1 = (estimated_params$beta2[1] - true_values$beta2[1])^2,
+    beta2_2 = (estimated_params$beta2[2] - true_values$beta2[2])^2,
+    sigma1 = (estimated_params$sigma1 - true_values$sigma1)^2,
+    sigma2 = (estimated_params$sigma2 - true_values$sigma2)^2
+  )
+  
+  return(list(bias = bias, mse = mse))
+}
+
+E_step <- function(data, beta, var, poids) {
+  y <- data$y                             # Variable de réponse
+  X <- model.matrix(~ x, data = data)     # Matrice pour les prédicteurs
+  n <- nrow(data)                         # Nombre d'observations
+  J <- length(poids)                      # Nombre de composants du mélange
+  
+  # Initialiser la matrice pour stocker les probabilités postérieures (omega)
+  omega <- matrix(0, n, J)
+  
+  # Calculer les probabilités postérieures pour chaque composant
+  for (j in 1:J) {
+    mu_j <- X %*% beta[[j]]               # Moyenne prédite pour le composant j
+    omega[, j] <- poids[j] * dnorm(y, mean = mu_j, sd = sqrt(var[j]))
+  }
+  
+  # Normaliser les responsabilités pour que la somme soit égale à 1
+  omega <- omega / rowSums(omega)
+  
+  return(omega)
+}
+
+M_step <- function(data, resp) {
+  X <- model.matrix(~ x, data = data)  # Matrice pour les prédicteurs
+  y <- data$y                          # Variable de réponse
+  
+  n <- nrow(data)                      # Nombre d'observations
+  K <- ncol(resp)                      # Nombre de composants
+  
+  # Initialiser les listes pour stocker les paramètres
+  beta <- vector("list", K)            # Coefficients de régression pour chaque composant
+  variances <- numeric(K)              # Variances pour chaque composant
+  poids <- numeric(K)                  # Probabilités de mélange pour chaque composant
+  
+  for (j in 1:K) {
+    W_j <- diag(resp[, j])             # Matrice diagonale des responsabilités pour le composant j
+    
+    # Mettre à jour beta 
+    beta[[j]] <- solve(t(X) %*% W_j %*% X) %*% t(X) %*% W_j %*% y
+    
+    # Mettre à jour la variance
+    residuals <- y - (X %*% beta[[j]])   # Résidus pour le composant j
+    variances[j] <- sum(resp[, j] * residuals^2) / sum(resp[, j])
+    
+    # Mettre à jour la probabilité de mélange (pi) pour le composant j
+    poids[j] <- sum(resp[, j]) / n
+  }
+  
+  return(list(beta = beta, variances = variances, poids = poids))
+}
+
+log_likelihood <- function(data, beta, variances, poids) {
+  n <- nrow(data)  # Nombre d'observations
+  J <- length(poids)  # Nombre de composants du mélange
+  ll <- 0  # Log-vraisemblance initiale
+  
+  for (i in 1:n) {
+    ll_i <- 0  # Log-vraisemblance pour l'observation i
+    for (j in 1:J) {
+      mu_j <- sum(beta[[j]] * c(1, data$x[i]))
+      # Calcul de la log-vraisemblance pour le composant j
+      ll_i <- ll_i + poids[j] * dnorm(data$y[i], mean = mu_j, sd = sqrt(variances[j]))
+    }
+    # Additionner la log-vraisemblance pour l'observation i
+    ll <- ll + log(ll_i)
+  }
+  return(ll)
+}
+
+em_algorithm <- function(data, beta_init, variances_init, poids_init, max_iter = 1000, tol = 1e-10) {
+  # Initialiser les paramètres
+  beta <- beta_init
+  variances <- variances_init
+  poids <- poids_init
+  
+  # Calculer la log-vraisemblance initiale
+  log_likelihood_old <- log_likelihood(data, beta, variances, poids)
+  
+  for (i in 1:max_iter) {
+    # Étape E : Calculer les responsabilités (probabilités a posteriori)
+    omega <- E_step(data, beta, variances, poids)
+    
+    # Étape M : Mettre à jour les paramètres en fonction des responsabilités
+    m <- M_step(data, omega)
+    
+    # Mettre à jour les paramètres pour la prochaine itération
+    beta <- m$beta
+    variances <- m$variances
+    poids <- m$poids
+    
+    # Calculer la nouvelle log-vraisemblance
+    log_likelihood_new <- log_likelihood(data, beta, variances, poids)
+    
+    # Vérifier la convergence en fonction de la log-vraisemblance
+    if (abs(log_likelihood_new - log_likelihood_old) < tol) {
+      break
+    }
+    
+    # Mettre à jour la log-vraisemblance ancienne
+    log_likelihood_old <- log_likelihood_new
+  }
+  
+  return(list(beta = beta, variances = variances, poids = poids, iterations = i))
+}
+
+C_step <- function(omega) {
+  # Assigner chaque observation au composant avec la responsabilité maximale
+  classifications <- apply(omega, 1, which.max)
+  return(classifications)
+}
+
+M_step_cem <- function(data, classifications) {
+  X <- model.matrix(~ x, data = data)  # Matrice pour les prédicteurs
+  y <- data$y                          # Variable de réponse
+  
+  n <- nrow(data)                      # Nombre d'observations
+  K <- length(unique(classifications)) # Nombre de composants du mélange
+  
+  # Initialisation des listes pour stocker les paramètres
+  beta <- vector("list", K)            # Coefficients de régression pour chaque composant
+  variances <- numeric(K)              # Variances pour chaque composant
+  poids <- numeric(K)                  # Probabilités de mélange pour chaque composant
+  
+  for (j in 1:K) {
+    # Identifier les indices des observations attribuées au composant j
+    indices <- which(classifications == j)
+    X_j <- X[indices, , drop = FALSE]  # Sous-ensemble de la matrice pour le composant j
+    y_j <- y[indices]                  # Sous-ensemble de la variable de réponse pour le composant j
+    
+    # Matrice de poids diagonale
+    W_j <- diag(1, nrow = length(indices), ncol = length(indices))
+    
+    # Mettre à jour beta 
+    eps <- 1e-4  # Paramètre de régularisation (petit pour éviter la singularité)
+    beta[[j]] <- solve(t(X_j) %*% (W_j + eps) %*% X_j) %*% t(X_j) %*% W_j %*% y_j
+    
+    # Mettre à jour la variance 
+    residuals <- y_j - (X_j %*% beta[[j]])  # Résidus pour le composant j
+    variances[j] <- sum(diag(W_j) * residuals^2) / sum(diag(W_j))
+    
+    # Mettre à jour la probabilité de mélange (pi_j pour le composant j)
+    poids[j] <- length(indices) / n  
+  }
+  
+  return(list(beta = beta, variances = variances, poids = poids))
+}
+
+CEM_algorithm <- function(data, beta_init, variances_init, poids_init, max_iter = 1000, tol = 1e-10) {
+  # Initialisation des paramètres
+  beta <- beta_init
+  variances <- variances_init
+  poids <- poids_init
+  
+  # Initialisation de la log-vraisemblance
+  log_likelihood_old <- log_likelihood(data, beta, variances, poids)
+  
+  for (i in 1:max_iter) {
+    # Étape E : Calcul des responsabilités (probabilités a posteriori)
+    omega <- E_step(data, beta, variances, poids)
+    
+    # Étape C : Classification des points de données en fonction de la responsabilité maximale
+    classifications <- C_step(omega)
+    
+    # Étape M : Mise à jour des paramètres en fonction des classifications 
+    m <- M_step_cem(data, classifications)
+    
+    # Mise à jour des paramètres pour la prochaine itération
+    beta <- m$beta
+    variances <- m$variances
+    poids <- m$poids
+    
+    # Calcul de la nouvelle log-vraisemblance
+    log_likelihood_new <- log_likelihood(data, beta, variances, poids)
+    
+    # Vérification de la convergence
+    if (abs(log_likelihood_new - log_likelihood_old) < tol) {
+      break
+    }
+    
+    # Mise à jour de la log-vraisemblance ancienne
+    log_likelihood_old <- log_likelihood_new
+  }
+  
+  return(list(beta = beta, variances = variances, poids = poids, classifications = classifications, iterations = i))
+}
+
+S_step <- function(omega) {
+    n <- nrow(omega) # Nombre d'observations
+    J <- ncol(omega) # Nombre de composants (colonnes de omega)
+    
+    # Échantillonnage des composants pour chaque observation
+    z <- apply(omega, 1, function(prob) {
+        which.max(rmultinom(1, 1, prob))
+    })
+    
+    return(z)
+}
+
+M_step_sem <- function(data, z) {
+    X <- model.matrix(~ x, data = data) # Matrice de conception des prédicteurs
+    y <- data$y                           # Variable de réponse
+    n <- nrow(data)                       # Nombre d'observations
+    J <- length(unique(z))                # Nombre de composants (basé sur les affectations z)
+    
+    # Initialisation des listes pour stocker les paramètres
+    beta <- vector("list", J)             # Coefficients de régression pour chaque composant
+    variances <- numeric(J)               # Variances pour chaque composant
+    poids <- numeric(J)                   # Probabilités de mélange pour chaque composant
+    
+    for (j in 1:J) {
+        # Identifier les indices des observations affectées au composant j
+        indices <- which(z == j)
+        X_j <- X[indices, , drop = FALSE]  # Sous-ensemble de X pour le composant j
+        y_j <- y[indices]                  # Sous-ensemble de y pour le composant j
+        eps <- 1e-4                        # Paramètre de régularisation (petit pour éviter la singularité)
+        beta[[j]] <- solve(t(X_j) %*% (X_j + eps)) %*% t(X_j) %*% y_j
+        residuals <- y_j - (X_j %*% beta[[j]])
+        variances[j] <- sum(residuals^2) / length(indices)
+        poids[j] <- length(indices) / n
+    }
+    
+    return(list(beta = beta, variances = variances, poids = poids))
+}
+
+sem_algorithm <- function(data, beta_init, variances_init, poids_init, max_iter = 1000, tol = 1e-10) {
+    # Initialisation des paramètres
+    beta <- beta_init
+    variances <- variances_init
+    poids <- poids_init
+    
+    # Calcul de la log-vraisemblance initiale
+    log_likelihood_old <- log_likelihood(data, beta, variances, poids)
+    
+    for (i in 1:max_iter) {
+        # Étape E : Calculer les probabilités a posteriori (omega)
+        omega <- E_step(data, beta, variances, poids)
+        
+        # Étape S : Affectation stochastique des variables latentes
+        z <- S_step(omega)
+        
+        # Étape M : Mise à jour des paramètres en fonction des affectations latentes
+        m <- M_step_sem(data, z)
+        
+        # Mettre à jour les paramètres
+        beta <- m$beta
+        variances <- m$variances
+        poids <- m$poids
+        
+        # Calculer la nouvelle log-vraisemblance
+        log_likelihood_new <- log_likelihood(data, beta, variances, poids)
+        
+        # Vérification de la convergence
+        if (abs(log_likelihood_new - log_likelihood_old) < tol) {
+            break
+        }
+        # Mettre à jour la log-vraisemblance précédente
+        log_likelihood_old <- log_likelihood_new
+    }
+    
+    return(list(beta = beta, variances = variances, poids = poids, iterations = i))
+}
+
+predict_custom_em <- function(fit, new_data, method = "soft") {
+  # Initialisation des paramètres
+  beta <- fit$beta                # Coefficients de régression initiaux pour chaque composant
+  variances <- fit$variances     # Variances initiales pour chaque composant
+  lambda <- fit$lambda             # Probabilités de mélange initiales pour chaque composant
+  
+  X <- model.matrix(~ x, data = new_data)
+
+  n <- nrow(new_data)
+  J <- length(beta)
+  posterior <- matrix(0, n, J)
+  y_pred <- numeric(n)
+  
+  # Calculer les probabilités a posteriori pour chaque composant
+  for (j in 1:J) {
+    mu_j <- X %*% beta[[j]] 
+    posterior[, j] <- lambda[j] * dnorm(new_data$y, mean = mu_j, sd = sqrt(variances[j]))
+  }
+  
+  # Normaliser les probabilités a posteriori pour chaque observation
+  posterior <- posterior / rowSums(posterior) 
+  
+  # Prédictions selon la méthode choisie
+  if (method == "soft") {
+    # Moyenne pondérée des prédictions
+    for (i in 1:n) {
+      predictions <- sapply(1:J, function(j) sum(beta[[j]] * X[i, ]))
+      y_pred[i] <- sum(posterior[i, ] * predictions)
+    }
+  } else if (method == "hard") {
+    # Utilisation du composant avec la plus haute probabilité a posteriori
+    for (i in 1:n) {
+      max_class <- which.max(posterior[i, ])
+      y_pred[i] <- sum(beta[[max_class]] * X[i, ])
+    }
+  } else {
+    stop("Méthode invalide. Choisissez 'soft' ou 'hard'.")
+  }
+  
+  return(y_pred)
+}
+
+fit_emcemsem_custom <- function(data, k, true_values, tolerance = 1e-10, max_iter = 1000) {
+    # Initialisation des paramètres
+    beta_init <- true_values$beta1
+    variances_init <- c(true_values$sigma1, true_values$sigma2)
+    poids_init <- c(true_values$pi_1, 1 - true_values$pi_1)
+    
+    # Ajustement du modèle EM
+    em_fit <- em_algorithm(data, 
+                           beta_init = list(beta_init, true_values$beta2),
+                           variances_init = variances_init,
+                           poids_init = poids_init, 
+                           max_iter = max_iter, 
+                           tol = tolerance)
+    
+    # Ajustement du modèle CEM
+    cem_fit <- CEM_algorithm(data, 
+                             beta_init = list(beta_init, true_values$beta2),
+                             variances_init = variances_init,
+                             poids_init = poids_init, 
+                             max_iter = max_iter, 
+                             tol = tolerance)
+    
+    # Ajustement du modèle SEM
+    sem_fit <- sem_algorithm(data, 
+                             beta_init = list(beta_init, true_values$beta2),
+                             variances_init = variances_init,
+                             poids_init = poids_init, 
+                             max_iter = max_iter, 
+                             tol = tolerance)
+    
+    # Retour des résultats estimés pour chaque algorithme
+    return(list(
+      em_results = list(
+        beta = em_fit$beta,
+        variances = em_fit$variances,
+        lambda = em_fit$poids,
+        iterations = em_fit$iterations
+      ),
+      cem_results = list(
+        beta = cem_fit$beta,
+        variances = cem_fit$variances,
+        lambda = cem_fit$poids,
+        iterations = cem_fit$iterations
+      ),
+      sem_results = list(
+        beta = sem_fit$beta,
+        variances = sem_fit$variances,
+        lambda = sem_fit$poids,
+        iterations = sem_fit$iterations
+      )
+    ))
+}
+
+k_fold_cv <- function(data, k = 5, fit_model_function, true_values) {
+  # Créer k sous-ensembles (folds) de taille égale
+  folds <- sample(1:k, nrow(data), replace = TRUE)
+  
+  # Initialiser des vecteurs pour stocker les valeurs RMSE pour chaque fold et chaque modèle
+  rmse_em_per_fold <- numeric(k)
+  rmse_cem_per_fold <- numeric(k)
+  rmse_sem_per_fold <- numeric(k)
+  
+  # Effectuer la validation croisée pour chaque fold
+  for (i in 1:k) {
+    # Séparer les données en ensembles de test et d'entraînement
+    test_data <- data[folds == i, ]
+    train_data <- data[folds != i, ]
+    
+    # Ajuster les modèles sur les données d'entraînement 
+    fit <- fit_model_function(train_data, k = 2, true_values = true_values)
+    
+    # Prédictions pour le modèle EM
+    predictions_em <- predict_custom_em(fit$em_results, test_data)
+    rmse_em_per_fold[i] <- sqrt(mean((test_data$y - predictions_em)^2))
+    
+    # Prédictions pour le modèle CEM
+    predictions_cem <- predict_custom_em(fit$cem_results, test_data)
+    rmse_cem_per_fold[i] <- sqrt(mean((test_data$y - predictions_cem)^2))
+    
+    # Prédictions pour le modèle SEM
+    predictions_sem <- predict_custom_em(fit$sem_results, test_data)
+    rmse_sem_per_fold[i] <- sqrt(mean((test_data$y - predictions_sem)^2))
+
+  }
+  
+  # Calculer et retourner les RMSE moyens pour chaque modèle sur tous les folds
+  mean_rmse_em <- mean(rmse_em_per_fold)
+  mean_rmse_cem <- mean(rmse_cem_per_fold)
+  mean_rmse_sem <- mean(rmse_sem_per_fold)
+  
+  return(list(mean_rmse_em = mean_rmse_em, mean_rmse_cem = mean_rmse_cem, mean_rmse_sem = mean_rmse_sem))
+}
+
+run_simulation <- function(num_replications = 200, n = 100, true_values, fit_model_function, k = 5) {
+  # Initialiser des variables pour stocker les résultats
+  em_iterations <- numeric(num_replications)  
+  cem_iterations <- numeric(num_replications)  
+  sem_iterations <- numeric(num_replications)  
+  
+  bias_all_em <- list()  
+  mse_all_em <- list()  
+  
+  bias_all_cem <- list()  
+  mse_all_cem <- list()  
+  
+  bias_all_sem <- list()  
+  mse_all_sem <- list()  
+  
+  rmse_all_em <- numeric(num_replications)  
+  rmse_all_cem <- numeric(num_replications)  
+  rmse_all_sem <- numeric(num_replications)  
+  
+  # Arrays pour stocker les estimations des paramètres pour EM, CEM, SEM
+  pi_1_em_estimates <- numeric(num_replications)
+  pi_2_em_estimates <- numeric(num_replications)
+  pi_1_cem_estimates <- numeric(num_replications)
+  pi_2_cem_estimates <- numeric(num_replications)
+  pi_1_sem_estimates <- numeric(num_replications)
+  pi_2_sem_estimates <- numeric(num_replications)
+  
+  beta1_em_estimates <- matrix(0, nrow = num_replications, ncol = 2)
+  beta2_em_estimates <- matrix(0, nrow = num_replications, ncol = 2)
+  beta1_cem_estimates <- matrix(0, nrow = num_replications, ncol = 2)
+  beta2_cem_estimates <- matrix(0, nrow = num_replications, ncol = 2)
+  beta1_sem_estimates <- matrix(0, nrow = num_replications, ncol = 2)
+  beta2_sem_estimates <- matrix(0, nrow = num_replications, ncol = 2)
+  
+  sigma1_em_estimates <- numeric(num_replications)
+  sigma2_em_estimates <- numeric(num_replications)
+  sigma1_cem_estimates <- numeric(num_replications)
+  sigma2_cem_estimates <- numeric(num_replications)
+  sigma1_sem_estimates <- numeric(num_replications)
+  sigma2_sem_estimates <- numeric(num_replications)
+  
+  for (m in 1:num_replications) {
+    # Étape 1 : Simuler les données
+    data <- generate_mixture_two_components(n, true_values$pi_1, true_values$beta1, true_values$beta2, true_values$sigma1, true_values$sigma2)
+    
+    # Étape 2 : Ajuster les modèles et collecter les résultats
+    fit <- fit_model_function(data, k = 2, true_values = true_values)
+    
+    # Étape 3 : Stocker les résultats
+    em_iterations[m] <- fit$em_results$iterations
+    cem_iterations[m] <- fit$cem_results$iterations
+    sem_iterations[m] <- fit$sem_results$iterations
+    
+    pi_1_em_estimates[m] <- fit$em_results$lambda[1]
+    pi_2_em_estimates[m] <- 1 - fit$em_results$lambda[1]
+    beta1_em_estimates[m, ] <- fit$em_results$beta[[1]]
+    beta2_em_estimates[m, ] <- fit$em_results$beta[[2]]
+    sigma1_em_estimates[m] <- fit$em_results$variances[1]
+    sigma2_em_estimates[m] <- fit$em_results$variances[2]
+    
+    pi_1_cem_estimates[m] <- fit$cem_results$lambda[1]
+    pi_2_cem_estimates[m] <- 1 - fit$cem_results$lambda[1]
+    beta1_cem_estimates[m, ] <- fit$cem_results$beta[[1]]
+    beta2_cem_estimates[m, ] <- fit$cem_results$beta[[2]]
+    sigma1_cem_estimates[m] <- fit$cem_results$variances[1]
+    sigma2_cem_estimates[m] <- fit$cem_results$variances[2]
+    
+    pi_1_sem_estimates[m] <- fit$sem_results$lambda[1]
+    pi_2_sem_estimates[m] <- 1 - fit$sem_results$lambda[1]
+    beta1_sem_estimates[m, ] <- fit$sem_results$beta[[1]]
+    beta2_sem_estimates[m, ] <- fit$sem_results$beta[[2]]
+    sigma1_sem_estimates[m] <- fit$sem_results$variances[1]
+    sigma2_sem_estimates[m] <- fit$sem_results$variances[2]
+    
+    estimated_params_em <- list(
+      pi_1 = pi_1_em_estimates[m],
+      pi_2 = pi_2_em_estimates[m],
+      beta1 = beta1_em_estimates[m, ],
+      beta2 = beta2_em_estimates[m, ],
+      sigma1 = sigma1_em_estimates[m],
+      sigma2 = sigma2_em_estimates[m]
+    )
+    
+    estimated_params_cem <- list(
+      pi_1 = pi_1_cem_estimates[m],
+      pi_2 = pi_2_cem_estimates[m],
+      beta1 = beta1_cem_estimates[m, ],
+      beta2 = beta2_cem_estimates[m, ],
+      sigma1 = sigma1_cem_estimates[m],
+      sigma2 = sigma2_cem_estimates[m]
+    )
+    
+    estimated_params_sem <- list(
+      pi_1 = pi_1_sem_estimates[m],
+      pi_2 = pi_2_sem_estimates[m],
+      beta1 = beta1_sem_estimates[m, ],
+      beta2 = beta2_sem_estimates[m, ],
+      sigma1 = sigma1_sem_estimates[m],
+      sigma2 = sigma2_sem_estimates[m]
+    )
+    
+    # Calculer le biais et le MSE pour chaque méthode
+    bias_all_em[[m]] <- compute_bias_mse(true_values, estimated_params_em)$bias
+    mse_all_em[[m]] <- compute_bias_mse(true_values, estimated_params_em)$mse
+    bias_all_cem[[m]] <- compute_bias_mse(true_values, estimated_params_cem)$bias
+    mse_all_cem[[m]] <- compute_bias_mse(true_values, estimated_params_cem)$mse
+    bias_all_sem[[m]] <- compute_bias_mse(true_values, estimated_params_sem)$bias
+    mse_all_sem[[m]] <- compute_bias_mse(true_values, estimated_params_sem)$mse
+    
+    # Calculer le RMSE pour chaque méthode
+    rmse_all_em[m] <- k_fold_cv(data, k, fit_model_function, true_values)$mean_rmse_em
+    rmse_all_cem[m] <- k_fold_cv(data, k, fit_model_function, true_values)$mean_rmse_cem
+    rmse_all_sem[m] <- k_fold_cv(data, k, fit_model_function, true_values)$mean_rmse_sem
+  }
+  
+  # Calculer les moyennes pour toutes les métriques
+  avg_em_iterations <- mean(em_iterations)
+  avg_cem_iterations <- mean(cem_iterations)
+  avg_sem_iterations <- mean(sem_iterations)
+  avg_bias_em <- colMeans(do.call(rbind, bias_all_em))
+  avg_mse_em <- colMeans(do.call(rbind, mse_all_em))
+  avg_bias_cem <- colMeans(do.call(rbind, bias_all_cem))
+  avg_mse_cem <- colMeans(do.call(rbind, mse_all_cem))
+  avg_bias_sem <- colMeans(do.call(rbind, bias_all_sem))
+  avg_mse_sem <- colMeans(do.call(rbind, mse_all_sem))
+  avg_rmse_em <- mean(rmse_all_em)
+  avg_rmse_cem <- mean(rmse_all_cem)
+  avg_rmse_sem <- mean(rmse_all_sem)
+  
+  return(list(
+    avg_em_iterations = avg_em_iterations,
+    avg_cem_iterations = avg_cem_iterations,
+    avg_sem_iterations = avg_sem_iterations,
+    avg_bias_em = avg_bias_em,
+    avg_bias_cem = avg_bias_cem,
+    avg_bias_sem = avg_bias_sem,
+    avg_mse_em = avg_mse_em,
+    avg_mse_cem = avg_mse_cem,
+    avg_mse_sem = avg_mse_sem,
+    avg_rmse_em = avg_rmse_em,
+    avg_rmse_cem = avg_rmse_cem,
+    avg_rmse_sem = avg_rmse_sem
+  ))
+}
+
+# Valeurs réelles pour les lignes parallèles
+true_values_parallel <- list(
+  pi_1 = 0.7, sigma1 = 1, sigma2 = 1,
+  beta1 = c(0, 1), beta2 = c(4, 1)
+)
+
+
+# Valeurs réelles pour les lignes concourantes
+true_values_concurrent <- list(
+  pi_1 = 0.7, sigma1 = 0.2^2, sigma2 = 0.2^2,
+  beta1 = c(1, -1), beta2 = c(0, 0.5)
+)
+
+simulation_results <- run_simulation(
+  num_replications = 200,
+  n = 50,
+  true_values = true_values_concurrent,
+  fit_model_function = fit_emcemsem_custom
+)
+
+cat("Nombre moyen d'itérations pour l'algorithme EM : ", simulation_results$avg_em_iterations, "\n")
+cat("Nombre moyen d'itérations pour l'algorithme CEM : ", simulation_results$avg_cem_iterations, "\n")
+cat("Nombre moyen d'itérations pour l'algorithme SEM : ", simulation_results$avg_sem_iterations, "\n")
+cat("Biais moyen pour EM (pi_1, pi_2, beta1, beta2, sigma1, sigma2): \n")
+print(simulation_results$avg_bias_em)
+cat("Biais moyen pour CEM (pi_1, pi_2, beta1, beta2, sigma1, sigma2): \n")
+print(simulation_results$avg_bias_cem)
+cat("Biais moyen pour SEM (pi_1, pi_2, beta1, beta2, sigma1, sigma2): \n")
+print(simulation_results$avg_bias_sem)
+cat("MSE moyen pour EM (pi_1, pi_2, beta1, beta2, sigma1, sigma2): \n")
+print(simulation_results$avg_mse_em)
+cat("MSE moyen pour CEM (pi_1, pi_2, beta1, beta2, sigma1, sigma2): \n")
+print(simulation_results$avg_mse_cem)
+cat("MSE moyen pour SEM (pi_1, pi_2, beta1, beta2, sigma1, sigma2): \n")
+print(simulation_results$avg_mse_sem)
+cat("RMSE moyen pour EM : \n")
+print(simulation_results$avg_rmse_em)
+cat("RMSE moyen pour CEM : \n")
+print(simulation_results$avg_rmse_cem)
+cat("RMSE moyen pour SEM : \n")
+print(simulation_results$avg_rmse_sem)
+```
+
+
+
